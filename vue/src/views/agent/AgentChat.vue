@@ -1,0 +1,382 @@
+<script setup>
+import { ChatDotRound, Cpu, Delete, EditPen, Plus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { createSession, deleteSession, getMessages, getModelOptions, listSessions, renameSession, streamChat } from '../../api/ai'
+import { formatDateTime, formatShortDate } from '../../utils/format'
+import { useUserStore } from '../../stores/user'
+import MarkdownViewer from './components/MarkdownViewer.vue'
+import StepTimeline from './components/StepTimeline.vue'
+import './agent.css'
+
+const router = useRouter()
+const route = useRoute()
+const user = useUserStore()
+
+const pageSize = 30
+const uuid = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i
+const sessions = ref([])
+const messages = ref([])
+const sessionError = ref('')
+const messageError = ref('')
+const readingList = ref(false)
+const readingMessages = ref(false)
+const mutating = ref(false)
+const nextOffset = ref(0)
+const hasMore = ref(false)
+const historyVersion = ref(0)
+const scroller = ref(null)
+const draft = ref('')
+const sending = ref(false)
+const chatError = ref('')
+const modelOptions = ref([])
+const selectedModel = ref('')
+const loadingModels = ref(true)
+const modelError = ref('')
+const modelRequest = new AbortController()
+
+const selectedId = computed(() => {
+  const id = route.query.session
+  return typeof id === 'string' && uuid.test(id) ? id.toLowerCase() : ''
+})
+const current = computed(() => sessions.value.find((session) => session.session_id === selectedId.value))
+const runLabels = { running: '执行中', error: '执行失败', interrupted: '已中断' }
+let listRequest
+let chatRequest
+let disposed = false
+
+function selectSession(id, replace = false) {
+  if (disposed) return
+  const query = { ...route.query }
+  if (id) query.session = id
+  else delete query.session
+  const to = { path: route.path, query }
+  return replace ? router.replace(to) : router.push(to)
+}
+
+async function loadSessions({ more = false } = {}) {
+  listRequest?.abort()
+  const controller = new AbortController()
+  listRequest = controller
+  const { signal } = controller
+  readingList.value = true
+  sessionError.value = ''
+  try {
+    const offset = more ? nextOffset.value : 0
+    const data = await listSessions({ limit: pageSize, offset, signal })
+    if (signal.aborted) return
+    const prior = more ? sessions.value : []
+    const known = new Set(prior.map((session) => session.session_id))
+    sessions.value = [...prior, ...data.filter((session) => !known.has(session.session_id))]
+    nextOffset.value = offset + data.length
+    hasMore.value = data.length === pageSize
+    if (!selectedId.value && sessions.value.length) await selectSession(sessions.value[0].session_id, true)
+  } catch (error) {
+    if (!signal.aborted) sessionError.value = error.message
+  } finally {
+    if (!signal.aborted) readingList.value = false
+  }
+}
+
+watch([selectedId, historyVersion], async ([id], [previousId], onCleanup) => {
+  if (id !== previousId) {
+    chatRequest?.abort()
+    draft.value = ''
+    chatError.value = ''
+  }
+  const controller = new AbortController()
+  const { signal } = controller
+  onCleanup(() => controller.abort())
+  messageError.value = ''
+  messages.value = []
+  readingMessages.value = Boolean(id)
+  if (scroller.value) scroller.value.scrollTop = 0
+  if (!id) return
+
+  try {
+    const history = await getMessages(id, signal)
+    if (!signal.aborted) messages.value = history
+  } catch (error) {
+    if (!signal.aborted) messageError.value = error.message
+  } finally {
+    if (!signal.aborted) readingMessages.value = false
+  }
+}, { immediate: true })
+
+async function updateSession(action) {
+  if (mutating.value) return
+  mutating.value = true
+  try {
+    await action()
+  } catch (error) {
+    if (!disposed && error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error.message || '操作未完成，请重试。')
+    }
+  } finally {
+    mutating.value = false
+  }
+}
+
+function add() {
+  return updateSession(async () => {
+    const result = await createSession()
+    if (disposed) return
+    await selectSession(result.session_id)
+    await loadSessions()
+  })
+}
+
+function edit() {
+  const session = current.value
+  if (!session) return
+  return updateSession(async () => {
+    const { value } = await ElMessageBox.prompt('输入新的会话名称。', '重命名会话', {
+      inputValue: session.title,
+      inputPlaceholder: '会话名称',
+      inputValidator(title) {
+        const length = Array.from(title?.trim() || '').length
+        return length >= 1 && length <= 160 ? true : '请输入 1 到 160 个字符'
+      },
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+    })
+    if (disposed) return
+    await renameSession(session.session_id, value.trim())
+    if (!disposed) await loadSessions()
+  })
+}
+
+function remove() {
+  const session = current.value
+  if (!session) return
+  return updateSession(async () => {
+    await ElMessageBox.confirm(
+      '确定删除「' + session.title + '」？该会话的消息和执行记录也会删除。',
+      '删除会话',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+    if (disposed) return
+    await deleteSession(session.session_id)
+    if (disposed) return
+    sessions.value = sessions.value.filter((entry) => entry.session_id !== session.session_id)
+    if (selectedId.value === session.session_id) {
+      await selectSession(sessions.value[0]?.session_id, true)
+    }
+    await loadSessions()
+  })
+}
+
+async function loadModels() {
+  const { signal } = modelRequest
+  try {
+    const data = await getModelOptions(signal)
+    if (!signal.aborted) {
+      modelOptions.value = data.models
+      selectedModel.value = data.default_model
+    }
+  } catch (error) {
+    if (!signal.aborted) modelError.value = error.message
+  } finally {
+    if (!signal.aborted) loadingModels.value = false
+  }
+}
+
+function scrollToLatest() {
+  void nextTick(() => {
+    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+  })
+}
+
+async function send() {
+  const sessionId = selectedId.value
+  const query = draft.value.trim()
+  if (!sessionId || !query || sending.value || readingMessages.value || mutating.value || messageError.value) return
+
+  const controller = new AbortController()
+  chatRequest = controller
+  const { signal } = controller
+  sending.value = true
+  chatError.value = ''
+  let answer
+  try {
+    const onEvent = (event, data) => {
+      if (signal.aborted || selectedId.value !== sessionId) return
+      if (event === 'start') {
+        const created_at = new Date().toISOString()
+        answer = reactive({
+          id: data.message_id,
+          role: 'assistant',
+          content: '',
+          created_at,
+          run_status: 'running',
+          steps: [],
+        })
+        messages.value.push({ id: data.user_message_id, role: 'user', content: query, created_at }, answer)
+        draft.value = ''
+        scrollToLatest()
+      } else if (event === 'token' && answer) {
+        const element = scroller.value
+        const nearBottom = element && element.scrollHeight - element.scrollTop - element.clientHeight < 90
+        answer.content += data.content
+        if (nearBottom) scrollToLatest()
+      } else if (event === 'done' && answer) {
+        answer.run_status = 'success'
+      }
+    }
+    await streamChat({ sessionId, query, model: selectedModel.value, signal, onEvent })
+  } catch (error) {
+    if (answer) answer.run_status = signal.aborted ? 'interrupted' : 'error'
+    if (!disposed && !signal.aborted && selectedId.value === sessionId) {
+      chatError.value = error.message || '发送失败，请重试。'
+    }
+  } finally {
+    sending.value = false
+    chatRequest = undefined
+    if (answer && !disposed) void loadSessions()
+  }
+}
+
+function stop() {
+  chatRequest?.abort()
+}
+
+function sendOnEnter(event) {
+  if (event.isComposing || event.shiftKey) return
+  event.preventDefault()
+  void send()
+}
+
+onBeforeUnmount(() => {
+  disposed = true
+  listRequest?.abort()
+  modelRequest.abort()
+  stop()
+})
+void loadSessions()
+void loadModels()
+</script>
+
+<template>
+  <section class="page agent-page">
+    <div class="page-heading">
+      <h1>{{ $route.meta.title }}</h1>
+      <p>向仓储助手提问，查看对话历史与执行记录。</p>
+    </div>
+
+    <div class="surface agent-workspace">
+      <aside class="session-rail" aria-label="历史会话">
+        <div class="session-header">
+          <h2>历史会话</h2>
+          <el-button type="primary" :icon="Plus" :disabled="mutating" @click="add">新建</el-button>
+        </div>
+        <div class="session-scroll">
+          <div v-if="sessionError" class="session-feedback" role="alert">
+            <p>{{ sessionError }}</p>
+            <button type="button" class="text-link" @click="loadSessions()">重试</button>
+          </div>
+          <p v-else-if="readingList && !sessions.length" class="session-feedback" role="status">加载会话中…</p>
+          <p v-else-if="!sessions.length" class="session-feedback">暂无会话。</p>
+          <ul v-if="sessions.length" class="session-list">
+            <li v-for="session in sessions" :key="session.session_id">
+              <button
+                type="button"
+                :class="{ 'session-active': session.session_id === selectedId }"
+                :aria-current="session.session_id === selectedId ? 'true' : undefined"
+                :title="session.title"
+                @click="selectSession(session.session_id)"
+              >
+                <ChatDotRound class="icon" aria-hidden="true" />
+                <span class="session-title">{{ session.title }}</span>
+                <time :datetime="session.updated_at">{{ formatShortDate(session.updated_at) }}</time>
+              </button>
+            </li>
+          </ul>
+          <button v-if="hasMore && !sessionError" type="button" class="text-link load-more" :disabled="readingList" @click="loadSessions({ more: true })">
+            {{ readingList ? '加载中…' : '加载更多会话' }}
+          </button>
+        </div>
+      </aside>
+
+      <section class="conversation" aria-label="会话内容">
+        <header class="conversation-header">
+          <span class="conversation-icon"><Cpu class="icon" aria-hidden="true" /></span>
+          <div class="conversation-title">
+            <h2>{{ current?.title || (selectedId ? '会话详情' : '仓储助手') }}</h2>
+            <span v-if="current">更新于 {{ formatDateTime(current.updated_at) }}</span>
+          </div>
+          <div v-if="current" class="conversation-actions">
+            <button type="button" class="icon-button" title="重命名会话" aria-label="重命名会话" :disabled="mutating" @click="edit"><EditPen class="icon" aria-hidden="true" /></button>
+            <button type="button" class="icon-button danger-button" title="删除会话" aria-label="删除会话" :disabled="mutating || sending" @click="remove"><Delete class="icon" aria-hidden="true" /></button>
+          </div>
+        </header>
+
+        <div ref="scroller" class="conversation-scroll" :aria-busy="readingMessages">
+          <div v-if="messageError" class="conversation-empty" role="alert">
+            <span class="empty-icon"><ChatDotRound class="icon" aria-hidden="true" /></span>
+            <h3>会话加载失败</h3>
+            <p>{{ messageError }}</p>
+            <el-button @click="historyVersion++">重新加载</el-button>
+          </div>
+          <p v-else-if="readingMessages" class="conversation-empty" role="status">正在加载消息…</p>
+          <div v-else-if="!messages.length" class="conversation-empty">
+            <span class="empty-icon"><ChatDotRound class="icon" aria-hidden="true" /></span>
+            <h3>{{ selectedId ? '这段会话还没有消息' : '选择一段会话' }}</h3>
+            <p v-if="!selectedId">选择已有会话或新建会话后即可发送消息。</p>
+          </div>
+
+          <div v-else class="message-list">
+            <article v-for="message in messages" :key="message.id" class="message" :class="'message-' + message.role">
+              <span v-if="message.role === 'assistant'" class="message-avatar"><Cpu class="icon" aria-hidden="true" /></span>
+              <span v-else class="message-avatar user-message-avatar">{{ user.initial }}</span>
+              <div class="message-main">
+                <div class="message-meta">
+                  <strong>{{ message.role === 'assistant' ? '仓储助手' : '你' }}</strong>
+                  <time :datetime="message.created_at">{{ formatDateTime(message.created_at) }}</time>
+                  <span v-if="runLabels[message.run_status]" class="message-run" :class="'run-' + message.run_status">{{ runLabels[message.run_status] }}</span>
+                </div>
+                <StepTimeline v-if="message.role === 'assistant' && message.steps.length" :message="message" />
+                <template v-if="message.role === 'assistant'">
+                  <MarkdownViewer v-if="message.content" :content="message.content" />
+                  <p v-else class="message-placeholder">{{ message.run_status === 'running' ? '正在生成回复…' : '本轮没有生成回复。' }}</p>
+                </template>
+                <p v-else class="user-content">{{ message.content }}</p>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <form class="chat-composer" aria-label="发送消息" @submit.prevent="send">
+          <p v-if="chatError" class="chat-composer-error" role="alert">{{ chatError }}</p>
+          <textarea
+            v-model="draft"
+            class="chat-input"
+            rows="2"
+            maxlength="4000"
+            aria-label="消息内容"
+            :placeholder="selectedId ? '向仓储助手提问' : '选择或新建会话'"
+            :disabled="!selectedId || sending || Boolean(messageError)"
+            @keydown.enter="sendOnEnter"
+          ></textarea>
+          <div class="chat-composer-row">
+            <label class="chat-model-picker" :title="modelError || selectedModel">
+              <span>模型</span>
+              <select v-model="selectedModel" :disabled="sending || modelOptions.length < 2">
+                <option v-if="!modelOptions.length" value="">{{ loadingModels ? '加载中…' : '默认模型' }}</option>
+                <option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.name }}</option>
+              </select>
+            </label>
+            <el-button v-if="sending" size="large" @click="stop">停止生成</el-button>
+            <el-button
+              v-else
+              type="primary"
+              size="large"
+              native-type="submit"
+              :disabled="!selectedId || !draft.trim() || readingMessages || mutating || Boolean(messageError)"
+            >发送</el-button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </section>
+</template>
