@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,6 +22,8 @@ class ExecutionStep:
     duration_ms: int | None
     status: str
     created_at: datetime
+    call_id: str | None = None
+    parent_call_id: str | None = None
 
     def event_data(self) -> dict:
         data = {
@@ -33,6 +37,8 @@ class ExecutionStep:
             "duration_ms": self.duration_ms,
             "status": self.status,
             "created_at": self.created_at.isoformat(timespec="milliseconds"),
+            "call_id": self.call_id,
+            "parent_call_id": self.parent_call_id,
         }
         if self.event_type == "dispatch":
             data["task"] = self.result_summary
@@ -53,7 +59,13 @@ class Timeline:
     tool_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
     pending_tools: set[asyncio.Task] = field(default_factory=set)
     evidence: list[dict] = field(default_factory=list)
+    loop: asyncio.AbstractEventLoop | None = None
+    on_step: Callable[[ExecutionStep], None] | None = None
     _step_order: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def bind(self) -> None:
+        self.loop = asyncio.get_running_loop()
 
     def record(
         self,
@@ -66,25 +78,43 @@ class Timeline:
         summary: str | None = None,
         duration_ms: int | None = None,
         status: str = "success",
+        call_id: str | None = None,
+        parent_call_id: str | None = None,
     ) -> int:
-        if step_order is None:
-            self._step_order += 1
-            step_order = self._step_order
-        index = next((
-            index for index, previous in enumerate(self.steps)
-            if previous.step_order == step_order and previous.event_type == event_type
-        ), len(self.steps))
-        created_at = self.steps[index].created_at if index < len(self.steps) else datetime.now(SHANGHAI)
-        step = ExecutionStep(
-            step_order, event_type, agent_name, tool_name, tool_args, summary,
-            duration_ms, status, created_at,
-        )
-        if index == len(self.steps):
-            self.steps.append(step)
-        else:
-            self.steps[index] = step
-        self.queue.put_nowait((event_type, step.event_data()))
+        with self._lock:
+            if step_order is None:
+                self._step_order += 1
+                step_order = self._step_order
+            index = next((
+                index for index, previous in enumerate(self.steps)
+                if previous.step_order == step_order and previous.event_type == event_type
+            ), len(self.steps))
+            created_at = self.steps[index].created_at if index < len(self.steps) else datetime.now(SHANGHAI)
+            step = ExecutionStep(
+                step_order, event_type, agent_name, tool_name, tool_args, summary,
+                duration_ms, status, created_at, call_id, parent_call_id,
+            )
+            if index == len(self.steps):
+                self.steps.append(step)
+            else:
+                self.steps[index] = step
+            self._emit(event_type, step.event_data())
+        if self.on_step is not None:
+            self.on_step(step)
         return step_order
+
+    def _emit(self, event_type: str, data: dict) -> None:
+        """工具调用在 worker 线程里执行，事件必须回到事件循环线程入队。"""
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and (self.loop is None or running is self.loop):
+            self.queue.put_nowait((event_type, data))
+        elif self.loop is not None:
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, (event_type, data))
+        else:
+            self.queue.put_nowait((event_type, data))
 
     async def finish_pending_tools(self) -> None:
         if self.pending_tools:

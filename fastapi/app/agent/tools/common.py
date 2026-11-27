@@ -18,7 +18,12 @@ class ToolArguments(BaseModel):
 
 
 class PageArgs(ToolArguments):
-    limit: Annotated[int, Field(ge=1, le=50)] = 20
+    limit: Annotated[int, Field(ge=1, le=50)] = Field(
+        default=20, description="本页返回条数，最多 50",
+    )
+    offset: Annotated[int, Field(ge=0, le=100000)] = Field(
+        default=0, description="跳过前面多少条；续查时传上一页的 next_offset",
+    )
 
 
 class WarehouseArgs(PageArgs):
@@ -46,6 +51,7 @@ class ToolContext:
     user: AuthenticatedUser
     session_id: str
     run_id: int
+    operation_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +93,16 @@ def paged(
     sql: str,
     params: Mapping[str, Any],
     limit: int,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    rows = query_rows(db, sql + "\nLIMIT :limit", {**params, "limit": limit + 1})
-    return {"rows": rows[:limit], "truncated": len(rows) > limit}
+    """分页查询：多取一条判断是否还有下一页，并给出续查用的 next_offset。"""
+    rows = query_rows(db, sql + "\nLIMIT :limit OFFSET :offset", {**params, "limit": limit + 1, "offset": offset})
+    page = rows[:limit]
+    truncated = len(rows) > limit
+    return {
+        "rows": page,
+        "limit": limit,
+        "offset": offset,
+        "truncated": truncated,
+        "next_offset": offset + len(page) if truncated else None,
+    }

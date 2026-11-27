@@ -26,6 +26,8 @@ class AiSession(AuditColumns, Base):
     user_id: Mapped[int] = mapped_column(BigInteger)
     title: Mapped[str] = mapped_column(String(160), server_default=text("'新对话'"))
     context_summary: Mapped[str | None] = mapped_column(Text)
+    context_summary_through_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    context_state: Mapped[dict | None] = mapped_column(JSON)
 
 
 class AiMessage(AuditColumns, Base):
@@ -47,8 +49,11 @@ class AiRun(AuditColumns, Base):
     session_id: Mapped[str] = mapped_column(CHAR(36, charset="ascii", collation="ascii_bin"))
     user_message_id: Mapped[int] = mapped_column(BigInteger)
     assistant_message_id: Mapped[int] = mapped_column(BigInteger)
+    client_request_id: Mapped[str | None] = mapped_column(String(64))
+    operation_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(12), server_default=text("'running'"))
     started_at: Mapped[datetime] = mapped_column(DATETIME(fsp=3), server_default=text("CURRENT_TIMESTAMP(3)"))
+    heartbeat_at: Mapped[datetime] = mapped_column(DATETIME(fsp=3), server_default=text("CURRENT_TIMESTAMP(3)"))
     finished_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=3))
     error_message: Mapped[str | None] = mapped_column(String(500))
 
@@ -61,8 +66,26 @@ class AiExecutionStep(AuditColumns, Base):
     step_order: Mapped[int] = mapped_column(INTEGER(unsigned=True))
     event_type: Mapped[str] = mapped_column(String(16))
     agent_name: Mapped[str | None] = mapped_column(String(64))
+    call_id: Mapped[str | None] = mapped_column(String(64))
+    parent_call_id: Mapped[str | None] = mapped_column(String(64))
     tool_name: Mapped[str | None] = mapped_column(String(96))
     tool_args: Mapped[JsonValue | None] = mapped_column(JSON)
     result_summary: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(INTEGER(unsigned=True))
     status: Mapped[str] = mapped_column(String(8), server_default=text("'success'"))
+
+
+class AiDraftOperation(AuditColumns, Base):
+    __tablename__ = "ai_draft_operation"
+
+    id: Mapped[str] = mapped_column(CHAR(36, charset="ascii", collation="ascii_bin"), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(CHAR(36, charset="ascii", collation="ascii_bin"))
+    operation_key: Mapped[str] = mapped_column(String(191))
+    session_id: Mapped[str] = mapped_column(CHAR(36, charset="ascii", collation="ascii_bin"))
+    run_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    order_type: Mapped[str] = mapped_column(String(16))
+    order_id: Mapped[int] = mapped_column(BigInteger)
+    order_no: Mapped[str] = mapped_column(String(14))
+    item_count: Mapped[int] = mapped_column(INTEGER(unsigned=True), server_default=text("0"))
+    status: Mapped[str] = mapped_column(String(12), server_default=text("'created'"))

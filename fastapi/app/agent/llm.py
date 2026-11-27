@@ -105,6 +105,36 @@ class ChatModel:
             extra_body=options,
         )
 
+    async def complete(
+        self, messages: list[dict[str, str]], *, system_prompt: str = SYSTEM_PROMPT, max_tokens: int = 600,
+    ) -> str:
+        """非流式补全，用于会话摘要等后台任务。"""
+        request = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system_prompt}, *messages],
+            "stream": False,
+            "max_tokens": max_tokens,
+        }
+        if self.endpoint.host == "api.deepseek.com":
+            request["thinking"] = {"type": "disabled"}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10)) as client:
+                response = await client.post(self.endpoint, headers=self.authorization(), json=request)
+        except httpx.TimeoutException:
+            raise ModelError("模型服务响应超时，请稍后重试。") from None
+        except httpx.RequestError:
+            raise ModelError("模型连接中断或无法建立，请检查 Base URL 与网络。") from None
+
+        if response.status_code != 200:
+            _check_completion_status(response.status_code)
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise ModelError("模型网关返回了无效的补全数据。") from None
+        if not isinstance(content, str) or not content.strip():
+            raise ModelError("模型没有返回可用的补全内容。")
+        return content.strip()
+
     async def stream(
         self, messages: list[dict[str, str]], *, system_prompt: str = SYSTEM_PROMPT,
     ) -> AsyncIterator[str]:
@@ -178,6 +208,16 @@ async def _fetch_models(model: ChatModel) -> tuple[ModelOption, ...]:
         label = name.strip()[:160] if isinstance(name, str) else ""
         options.setdefault(model_id, ModelOption(model_id, label or model_id))
     return tuple(options.values())
+
+
+def _check_completion_status(code: int) -> None:
+    if code in (401, 403):
+        raise ModelError("模型服务拒绝鉴权，请检查 FastAPI 中的 API Key。")
+    if code in (400, 404, 422):
+        raise ModelError(f"模型接口返回 {code}，请检查 Base URL 和网关支持的模型标识。")
+    if code == 429:
+        raise ModelError("模型请求达到频率或额度限制，请稍后重试。")
+    raise ModelError(f"模型服务返回 HTTP {code}，请检查网关状态。")
 
 
 def _check_response(response: httpx.Response) -> None:

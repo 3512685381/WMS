@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import logging
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -10,24 +11,36 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.agent.run_state import sweep_stale_runs
 from app.core.config import settings
-from app.core.database import DbSession, engine
+from app.core.database import DbSession, SessionLocal, engine
 from app.routers.chat import router as chat_router
+from app.routers.run import router as run_router
 from app.routers.session import router as sessions_router
 from app.schemas import ApiResult
 
 logger = logging.getLogger(__name__)
 
 
+def sweep_runs_on_startup() -> None:
+    """进程重启后不再永久显示执行中，把失去执行者的运行标记为 interrupted。"""
+    try:
+        with SessionLocal.begin() as db:
+            sweep_stale_runs(db)
+    except SQLAlchemyError as error:
+        logger.warning("启动时收敛运行记录失败 (%s)", type(error).__name__)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
+        await run_in_threadpool(sweep_runs_on_startup)
         yield
     finally:
         engine.dispose()
 
 
-app = FastAPI(title="WMS AI 后端", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="WMS AI 后端", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -36,6 +49,7 @@ app.add_middleware(
 )
 app.include_router(sessions_router)
 app.include_router(chat_router)
+app.include_router(run_router)
 
 
 @app.exception_handler(StarletteHTTPException)

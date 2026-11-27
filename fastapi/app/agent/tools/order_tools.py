@@ -97,7 +97,7 @@ def query_orders(ctx: ToolContext, args: OrderQuery) -> dict:
     results = paged(ctx.db, sql, {
         "warehouse": match(args.warehouse), "date_from": args.date_from, "date_to": args.date_to,
         "status": args.status, "order_no": args.order_no,
-    }, args.limit)
+    }, args.limit, args.offset)
     if args.order_no:
         for order in results["rows"]:
             name = order["order_type"]
@@ -133,16 +133,16 @@ def query_draft_references(ctx: ToolContext, args: DraftReferences) -> dict:
         SELECT {columns} FROM {table} WHERE is_deleted = 0 {filters}
           AND (:keyword IS NULL OR {code} LIKE :keyword ESCAPE '!' OR {name} LIKE :keyword ESCAPE '!')
         ORDER BY id
-        """, {"keyword": match(args.keyword), "warehouse_id": args.warehouse_id}, args.limit)
+        """, {"keyword": match(args.keyword), "warehouse_id": args.warehouse_id}, args.limit, args.offset)
 
 
 TOOLS = (
-    ToolSpec("query_orders", "按类型、完整单号、状态、仓库和日期查六类单据；给出完整单号时返回明细",
+    ToolSpec("query_orders", "按类型、完整单号、状态、仓库和日期查六类单据；给出完整单号时返回明细；结果截断时按 next_offset 续查",
              OrderQuery, ORDER_PERMISSIONS, query_orders),
-    ToolSpec("query_draft_references", "按名称或编码查询建单需要的仓库、库位、商品、供应商或客户 ID",
+    ToolSpec("query_draft_references", "按名称或编码查询建单需要的仓库、库位、商品、供应商或客户 ID；支持分页",
              DraftReferences, DRAFT_PERMISSIONS, query_draft_references),
-    ToolSpec("create_inbound_draft", "用户明确要求时，按已核实的仓库、供应商和明细代建入库草稿",
+    ToolSpec("create_inbound_draft", "仅在服务端判定本轮已获建单授权时，按已核实的仓库、供应商和明细代建入库草稿",
              InboundDraft, ("wms:inbound:add",), create_inbound_draft, writes_draft=True),
-    ToolSpec("create_outbound_draft", "用户明确要求时，按已核实的 SKU、库位及批次校验库存并代建出库草稿",
+    ToolSpec("create_outbound_draft", "仅在服务端判定本轮已获建单授权时，按已核实的 SKU、库位及批次校验库存并代建出库草稿",
              OutboundDraft, ("wms:outbound:add",), create_outbound_draft, writes_draft=True),
 )

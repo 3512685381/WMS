@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from pydantic import Field, StringConstraints
 from sqlalchemy import text
@@ -57,7 +58,26 @@ def _request_key(ctx: ToolContext, kind: DraftKind, args: DraftArguments) -> str
     data["items"].sort(key=lambda item: json.dumps(item, sort_keys=True))
     material = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(material.encode()).hexdigest()
-    return f"ai:{ctx.run_id}:{kind}:{digest}"
+    # 幂等键绑定本轮稳定操作标识，不随运行记录变化：网络重试沿用同一 operation_id 时不会重复建单。
+    return f"ai:{ctx.operation_id}:{kind}:{digest}"
+
+
+def _record_receipt(
+    ctx: ToolContext, kind: DraftKind, request_key: str, order_id: int, order_no: str, item_count: int,
+) -> None:
+    ctx.db.execute(text("""
+        INSERT INTO ai_draft_operation
+            (id, operation_id, operation_key, session_id, run_id, user_id, order_type, order_id, order_no,
+             item_count, status, created_by)
+        VALUES (:id, :operation_id, :operation_key, :session_id, :run_id, :user_id, :order_type, :order_id,
+                :order_no, :item_count, 'created', :user_id)
+        ON DUPLICATE KEY UPDATE order_id = VALUES(order_id), order_no = VALUES(order_no),
+            item_count = GREATEST(item_count, VALUES(item_count)), updated_at = CURRENT_TIMESTAMP(3)
+        """), {
+        "id": str(uuid4()), "operation_id": ctx.operation_id, "operation_key": request_key,
+        "session_id": ctx.session_id, "run_id": ctx.run_id, "user_id": ctx.user.id, "order_type": kind,
+        "order_id": order_id, "order_no": order_no, "item_count": item_count,
+    })
 
 
 def _prepare_number(ctx: ToolContext, kind: DraftKind, request_key: str) -> tuple[dict | None, dict]:
@@ -82,7 +102,11 @@ def _prepare_number(ctx: ToolContext, kind: DraftKind, request_key: str) -> tupl
         record = dict(existing)
         if record.pop("is_deleted"):
             raise ToolError("同一请求此前生成的单据已删除。")
-        return {**record, "reused": True}, {}
+        item_count = ctx.db.scalar(text(
+            f"SELECT COUNT(*) FROM wms_{kind}_item WHERE order_id = :order_id AND is_deleted = 0"
+        ), {"order_id": record["order_id"]})
+        _record_receipt(ctx, kind, request_key, record["order_id"], record["order_no"], int(item_count or 0))
+        return {**record, "order_type": kind, "reused": True}, {}
 
     number_start = f"{prefix}{business_date:%Y%m%d}"
     greatest = ctx.db.scalar(text(f"""
@@ -226,8 +250,9 @@ def _create_draft(ctx: ToolContext, kind: DraftKind, args: InboundDraft | Outbou
         VALUES (:order_id, :warehouse_id, :product_id, :location_id, :batch_no, :quantity, :unit_price,
                 :created_by{date_values})
         """), [{**row, "order_id": order_id} for row in rows])
-    return {"order_id": order_id, "order_no": number["order_no"], "status": 0, "source": "AI_AGENT",
-            "item_count": len(rows), "reused": False}
+    _record_receipt(ctx, kind, request_key, order_id, number["order_no"], len(rows))
+    return {"order_id": order_id, "order_no": number["order_no"], "order_type": kind, "status": 0,
+            "source": "AI_AGENT", "item_count": len(rows), "reused": False}
 
 
 def create_inbound_draft(ctx: ToolContext, args: InboundDraft) -> dict:

@@ -39,7 +39,7 @@ def query_realtime_inventory(ctx: ToolContext, args: InventoryQuery) -> dict:
           AND (:location IS NULL OR l.code LIKE :location ESCAPE '!')
           AND (:batch_no IS NULL OR i.batch_no = :batch_no)
         ORDER BY w.id, p.sku_code, l.code, i.batch_no, i.id
-        """, {**search_params(args), "location": match(args.location), "batch_no": args.batch_no}, args.limit)
+        """, {**search_params(args), "location": match(args.location), "batch_no": args.batch_no}, args.limit, args.offset)
 
 
 def query_inventory_logs(ctx: ToolContext, args: InventoryLogQuery) -> dict:
@@ -62,7 +62,7 @@ def query_inventory_logs(ctx: ToolContext, args: InventoryLogQuery) -> dict:
         """, {
         **search_params(args), "order_no": args.order_no, "biz_type": args.biz_type,
         "date_from": args.date_from, "date_to": args.date_to,
-    }, args.limit)
+    }, args.limit, args.offset)
 
 
 def query_warehouse_structure(ctx: ToolContext, args: WarehouseQuery) -> dict:
@@ -77,14 +77,14 @@ def query_warehouse_structure(ctx: ToolContext, args: WarehouseQuery) -> dict:
           AND (:warehouse IS NULL OR w.name LIKE :warehouse ESCAPE '!' OR w.code LIKE :warehouse ESCAPE '!')
           AND (:location IS NULL OR l.code LIKE :location ESCAPE '!')
         ORDER BY w.code, a.code, l.code
-        """, {"warehouse": match(args.warehouse), "location": match(args.location)}, args.limit)
+        """, {"warehouse": match(args.warehouse), "location": match(args.location)}, args.limit, args.offset)
 
 
 TOOLS = (
-    ToolSpec("query_realtime_inventory", "查询指定仓库、商品、库位或批次的在库、冻结和可用量", InventoryQuery,
+    ToolSpec("query_realtime_inventory", "查询指定仓库、商品、库位或批次的在库、冻结和可用量；结果截断时按 next_offset 续查", InventoryQuery,
              ("wms:inventory:list",), query_realtime_inventory),
-    ToolSpec("query_inventory_logs", "查询库存入出库、移库、调整和冻结流水", InventoryLogQuery,
+    ToolSpec("query_inventory_logs", "查询库存入出库、移库、调整和冻结流水；支持 limit 与 offset 分页", InventoryLogQuery,
              ("wms:inventory:logs",), query_inventory_logs),
-    ToolSpec("query_warehouse_structure", "查询仓库、库区和库位结构及编码", WarehouseQuery,
+    ToolSpec("query_warehouse_structure", "查询仓库、库区和库位结构及编码；支持 limit 与 offset 分页", WarehouseQuery,
              ("wms:warehouse:list", "wms:inventory:list"), query_warehouse_structure),
 )

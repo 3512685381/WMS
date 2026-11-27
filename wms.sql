@@ -699,6 +699,8 @@ CREATE TABLE IF NOT EXISTS ai_session (
     user_id BIGINT NOT NULL,
     title VARCHAR(160) NOT NULL DEFAULT '新对话',
     context_summary TEXT NULL,
+    context_summary_through_message_id BIGINT NULL COMMENT '已压缩进摘要的最大消息 ID',
+    context_state JSON NULL COMMENT '已确认的仓库、商品、批次与待补充字段',
     created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     created_by BIGINT NULL COMMENT '创建人 ID，NULL 表示系统写入',
@@ -734,8 +736,11 @@ CREATE TABLE IF NOT EXISTS ai_run (
     session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     user_message_id BIGINT NOT NULL,
     assistant_message_id BIGINT NOT NULL COMMENT '可先保存空消息以记录流式进度',
+    client_request_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT '客户端请求标识，用于请求级去重',
+    operation_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT '本轮业务的稳定操作标识',
     status VARCHAR(12) NOT NULL DEFAULT 'running',
     started_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    heartbeat_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '执行者心跳，用于租约判定',
     finished_at DATETIME(3) NULL,
     error_message VARCHAR(500) NULL,
     created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -745,6 +750,7 @@ CREATE TABLE IF NOT EXISTS ai_run (
 
     PRIMARY KEY (id),
     UNIQUE KEY uk_ai_run_assistant (assistant_message_id),
+    UNIQUE KEY uk_ai_run_client_request (session_id, client_request_id),
     KEY idx_ai_run_session_status (session_id, status, started_at),
     CONSTRAINT fk_ai_run_user_message FOREIGN KEY (session_id, user_message_id)
         REFERENCES ai_message (session_id, id) ON DELETE CASCADE,
@@ -760,6 +766,8 @@ CREATE TABLE IF NOT EXISTS ai_execution_step (
     step_order INT UNSIGNED NOT NULL COMMENT '同一工具调用的开始与结束共用序号',
     event_type VARCHAR(16) NOT NULL,
     agent_name VARCHAR(64) NULL,
+    call_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT '一次专家或工具调用的标识',
+    parent_call_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT '上级专家调用标识',
     tool_name VARCHAR(96) NULL,
     tool_args JSON NULL,
     result_summary TEXT NULL,
@@ -773,6 +781,7 @@ CREATE TABLE IF NOT EXISTS ai_execution_step (
     PRIMARY KEY (id),
     UNIQUE KEY uk_ai_step_event (message_id, step_order, event_type),
     KEY idx_ai_step_history (message_id, step_order, id),
+    KEY idx_ai_step_call (message_id, call_id),
     CONSTRAINT fk_ai_step_message FOREIGN KEY (message_id) REFERENCES ai_message (id) ON DELETE CASCADE,
     CONSTRAINT ck_ai_step_order CHECK (step_order > 0),
     CONSTRAINT ck_ai_step_type CHECK (
@@ -780,6 +789,34 @@ CREATE TABLE IF NOT EXISTS ai_execution_step (
     ),
     CONSTRAINT ck_ai_step_status CHECK (status IN ('running', 'success', 'error'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='AI 执行步骤与回放事件';
+
+CREATE TABLE IF NOT EXISTS ai_draft_operation (
+    id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    operation_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '一轮运行的稳定操作标识',
+    operation_key VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '草稿幂等键，与单据 request_key 一致',
+    session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    run_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    order_type VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'inbound 或 outbound',
+    order_id BIGINT NOT NULL,
+    order_no CHAR(14) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    item_count INT UNSIGNED NOT NULL DEFAULT 0,
+    status VARCHAR(12) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'created',
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    created_by BIGINT NULL COMMENT '创建人 ID，NULL 表示系统写入',
+    is_deleted TINYINT UNSIGNED NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_ai_draft_operation_key (operation_key),
+    UNIQUE KEY uk_ai_draft_order (order_type, order_id),
+    KEY idx_ai_draft_run (run_id),
+    KEY idx_ai_draft_session (session_id, created_at),
+    CONSTRAINT fk_ai_draft_run FOREIGN KEY (run_id) REFERENCES ai_run (id) ON DELETE CASCADE,
+    CONSTRAINT fk_ai_draft_session FOREIGN KEY (session_id) REFERENCES ai_session (id) ON DELETE CASCADE,
+    CONSTRAINT ck_ai_draft_order_type CHECK (order_type IN ('inbound', 'outbound')),
+    CONSTRAINT ck_ai_draft_status CHECK (status IN ('created', 'failed'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='AI 草稿操作回执，断流后仍可定位单号';
 
 -- 六、演示数据
 
