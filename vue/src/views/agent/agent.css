@@ -92,6 +92,10 @@
 .timeline-toggle strong { color: var(--ink); font-size: 13px; font-weight: 650; }
 .timeline-count { color: var(--hint); font-size: 11px; }
 .timeline-arrow { width: 13px; height: 13px; }
+.timeline-wait { display: flex; align-items: center; gap: 7px; margin: 0; padding: 4px 12px 13px; color: var(--ink-muted); font-size: 12px; }
+.timeline-loading { width: 13px; height: 13px; flex: 0 0 auto; animation: timeline-spin 1s linear infinite; }
+@keyframes timeline-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .timeline-loading { animation: none; } }
 .timeline-toggle[aria-expanded='true'] .timeline-arrow { transform: rotate(180deg); }
 .timeline-list { margin: 0; padding: 4px 12px 10px 25px; list-style: none; }
 .timeline-step { position: relative; padding: 6px 0 10px 13px; border-left: 1px solid #cfddd0; }
@@ -99,10 +103,12 @@
 .timeline-step:last-child { padding-bottom: 3px; }
 .timeline-step.step-error::before { background: #b04440; }
 .timeline-step.step-running::before { background: #9c6a31; }
+.timeline-step.step-interrupted::before { background: #9c6a31; }
 .step-title { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: baseline; color: var(--hint); font-size: 11px; }
 .step-title strong { color: var(--ink); font-size: 12px; font-weight: 640; }
 .step-time, .step-status { color: var(--accent); }
 .step-error .step-status { color: #9c3030; }
+.step-interrupted .step-status { color: #885a22; }
 .step-tool { display: inline-block; max-width: 100%; margin-top: 3px; color: #3d6554; font-size: 11px; overflow-wrap: anywhere; }
 .timeline-step p { margin: 4px 0 0; color: var(--ink-muted); font-size: 12px; overflow-wrap: anywhere; }
 .step-args { margin-top: 4px; color: var(--accent); font-size: 11px; }

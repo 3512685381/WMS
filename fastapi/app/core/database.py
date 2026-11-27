@@ -14,6 +14,8 @@ engine = create_engine(
     hide_parameters=True,
     connect_args={
         "connect_timeout": 5,
+        "read_timeout": 15,
+        "write_timeout": 15,
         "init_command": "SET time_zone = '+08:00'",
     },
 )

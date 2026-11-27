@@ -1,0 +1,11 @@
+{
+    "java.configuration.updateBuildConfiguration": "interactive",
+    "java.compile.nullAnalysis.mode": "automatic",
+    "java.configuration.runtimes": [
+        {
+            "name": "JavaSE-21",
+            "path": "/Users/yinhui/Dev/Java/jdk-21.0.13.1+2/Contents/Home",
+            "default": true
+        }
+    ]
+}

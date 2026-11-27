@@ -10,7 +10,11 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.20
-javaproperties==0.8.2
+langchain==1.5.2
+langchain-core==1.8.5
+langchain-openai==1.8.5
+langgraph==1.2.24
+openai==3.60.0
 opentelemetry-api==1.45.2
 pycparser==3.12
 pydantic==2.14.4

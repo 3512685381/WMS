@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createSession, deleteSession, getMessages, getModelOptions, listSessions, renameSession, streamChat } from '../../api/ai'
+import { applyExecutionStep } from '../../utils/agentTimeline'
 import { formatDateTime, formatShortDate } from '../../utils/format'
 import { useUserStore } from '../../stores/user'
 import MarkdownViewer from './components/MarkdownViewer.vue'
@@ -198,6 +199,7 @@ async function send() {
   const { signal } = controller
   sending.value = true
   chatError.value = ''
+  const started = performance.now()
   let answer
   try {
     const onEvent = (event, data) => {
@@ -211,17 +213,27 @@ async function send() {
           created_at,
           run_status: 'running',
           steps: [],
+          expert_count: 0,
+          tool_call_count: 0,
+          total_duration_ms: 0,
         })
         messages.value.push({ id: data.user_message_id, role: 'user', content: query, created_at }, answer)
         draft.value = ''
         scrollToLatest()
-      } else if (event === 'token' && answer) {
+      } else if (answer) {
         const element = scroller.value
         const nearBottom = element && element.scrollHeight - element.scrollTop - element.clientHeight < 90
-        answer.content += data.content
+        if (event === 'token') {
+          answer.content += data.content
+        } else if (event === 'done') {
+          answer.expert_count = data.expert_count
+          answer.tool_call_count = data.tool_call_count
+          answer.total_duration_ms = data.total_duration_ms
+          answer.run_status = 'success'
+        } else {
+          applyExecutionStep(answer, event, data)
+        }
         if (nearBottom) scrollToLatest()
-      } else if (event === 'done' && answer) {
-        answer.run_status = 'success'
       }
     }
     await streamChat({ sessionId, query, model: selectedModel.value, signal, onEvent })
@@ -231,6 +243,10 @@ async function send() {
       chatError.value = error.message || '发送失败，请重试。'
     }
   } finally {
+    if (answer && answer.run_status !== 'success') {
+      answer.total_duration_ms = Math.round(performance.now() - started)
+      if (answer.run_status === 'running') answer.run_status = signal.aborted ? 'interrupted' : 'error'
+    }
     sending.value = false
     chatRequest = undefined
     if (answer && !disposed) void loadSessions()
@@ -335,7 +351,7 @@ void loadModels()
                   <time :datetime="message.created_at">{{ formatDateTime(message.created_at) }}</time>
                   <span v-if="runLabels[message.run_status]" class="message-run" :class="'run-' + message.run_status">{{ runLabels[message.run_status] }}</span>
                 </div>
-                <StepTimeline v-if="message.role === 'assistant' && message.steps.length" :message="message" />
+                <StepTimeline v-if="message.role === 'assistant' && (message.steps?.length || message.run_status === 'running')" :message="message" />
                 <template v-if="message.role === 'assistant'">
                   <MarkdownViewer v-if="message.content" :content="message.content" />
                   <p v-else class="message-placeholder">{{ message.run_status === 'running' ? '正在生成回复…' : '本轮没有生成回复。' }}</p>

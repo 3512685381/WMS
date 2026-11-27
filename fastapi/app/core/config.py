@@ -1,23 +1,11 @@
 from pathlib import Path
-from typing import Any
 
-import javaproperties
 from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
-SHARED_CONFIG = PROJECT_DIR.parent / "springboot" / ".env"
-SHARED_KEYS = ("WMS_DB_NAME", "WMS_DB_USER", "WMS_DB_PASSWORD", "JWT_SECRET")
-
-
-def springboot_settings() -> dict[str, Any]:
-    if not SHARED_CONFIG.is_file():
-        return {}
-    with SHARED_CONFIG.open("rb") as config_file:
-        values = javaproperties.load(config_file)
-    return {key.lower(): values[key] for key in SHARED_KEYS if key in values}
 
 
 class Settings(BaseSettings):
@@ -46,17 +34,6 @@ class Settings(BaseSettings):
             "http://localhost:5173",
         ]
     )
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple:
-        return init_settings, env_settings, dotenv_settings, springboot_settings, file_secret_settings
 
     def mysql_url(self) -> URL:
         if self.database_url is not None:
