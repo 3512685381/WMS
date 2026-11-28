@@ -101,3 +101,32 @@ def test_remember_tool_context_records_draft(db):
     assert state["batches"] == ["B001"]
     assert state["draft"]["order_no"] == "CK202611270001"
     assert state["draft"]["kind"] == "outbound"
+
+
+def test_remember_tool_context_records_items(db):
+    session = make_session(db, [])
+    args = OutboundDraft(warehouse_id=1, items=[
+        {"product_id": 1, "location_id": 102, "quantity": "5", "batch_no": "B001"},
+    ])
+    remember_tool_context(db, session.id, args, {
+        "order_no": "CK202611280001", "order_id": 100, "order_type": "outbound", "status": 0,
+    })
+    item = session.context_state["items"][0]
+    assert item["product_id"] == 1
+    assert item["name"] == "20W 充电器"
+    assert item["quantity"] == "5"
+    assert item["unit"] == "件"
+    assert item["batch_no"] == "B001"
+
+
+def test_render_context_includes_confirmed_items():
+    text = render_context({
+        "warehouse": {"id": 1, "name": "中央仓"},
+        "items": [{
+            "product_id": 1, "name": "20W 充电器", "sku_code": "CHG-20W",
+            "unit": "件", "quantity": "5", "batch_no": "B001",
+        }],
+    })
+    assert "已确认明细" in text
+    assert "20W 充电器 5件" in text
+    assert "批次 B001" in text

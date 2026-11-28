@@ -3,7 +3,7 @@ import { ChatDotRound, Cpu, Delete, EditPen, Plus } from '@element-plus/icons-vu
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createSession, deleteSession, getMessages, getModelOptions, listSessions, renameSession, streamChat } from '../../api/ai'
+import { createSession, deleteSession, getMessages, getModelOptions, getRun, listSessions, renameSession, streamChat } from '../../api/ai'
 import { applyExecutionStep } from '../../utils/agentTimeline'
 import { formatDateTime, formatShortDate } from '../../utils/format'
 import { useUserStore } from '../../stores/user'
@@ -43,9 +43,46 @@ const selectedId = computed(() => {
 })
 const current = computed(() => sessions.value.find((session) => session.session_id === selectedId.value))
 const runLabels = { running: '执行中', error: '执行失败', interrupted: '已中断' }
+const RESUME_INTERVAL_MS = 2000
+const RESUME_MAX_ATTEMPTS = 150
+const lastRequest = ref(null)
 let listRequest
 let chatRequest
 let disposed = false
+
+function newRequestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  return 'req-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+}
+
+// 页面刷新或断线后读取已有运行：已完成的直接回放文本、步骤和草稿，不重新执行。
+async function resumeRun(message) {
+  const runId = message.run_id
+  const sessionId = selectedId.value
+  if (!runId || !sessionId) return
+  for (let attempt = 0; attempt < RESUME_MAX_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, RESUME_INTERVAL_MS))
+    if (disposed || selectedId.value !== sessionId || message.run_status !== 'running') return
+    let run
+    try {
+      run = await getRun(runId)
+    } catch {
+      return
+    }
+    if (disposed || selectedId.value !== sessionId) return
+    message.content = run.content
+    message.steps = run.steps
+    message.drafts = run.drafts
+    message.run_status = run.status
+    message.expert_count = run.expert_count
+    message.tool_call_count = run.tool_call_count
+    message.total_duration_ms = run.total_duration_ms
+    if (run.status !== 'running') {
+      scrollToLatest()
+      return
+    }
+  }
+}
 
 function selectSession(id, replace = false) {
   if (disposed) return
@@ -97,7 +134,12 @@ watch([selectedId, historyVersion], async ([id], [previousId], onCleanup) => {
 
   try {
     const history = await getMessages(id, signal)
-    if (!signal.aborted) messages.value = history
+    if (signal.aborted) return
+    messages.value = history
+    const running = [...messages.value].reverse().find(
+      (message) => message.role === 'assistant' && message.run_status === 'running' && message.run_id,
+    )
+    if (running) void resumeRun(running)
   } catch (error) {
     if (!signal.aborted) messageError.value = error.message
   } finally {
@@ -189,11 +231,15 @@ function scrollToLatest() {
   })
 }
 
-async function send() {
+async function send(retryPayload = null) {
   const sessionId = selectedId.value
-  const query = draft.value.trim()
+  const retrying = retryPayload && typeof retryPayload === 'object' && retryPayload.clientRequestId
+  const query = retrying ? retryPayload.query : draft.value.trim()
   if (!sessionId || !query || sending.value || readingMessages.value || mutating.value || messageError.value) return
 
+  // 同一次发送的网络重试沿用同一标识；服务端据此回放结果，不会重复建单。
+  const clientRequestId = retrying ? retryPayload.clientRequestId : newRequestId()
+  lastRequest.value = { query, clientRequestId }
   const controller = new AbortController()
   chatRequest = controller
   const { signal } = controller
@@ -205,21 +251,38 @@ async function send() {
     const onEvent = (event, data) => {
       if (signal.aborted || selectedId.value !== sessionId) return
       if (event === 'start') {
-        const created_at = new Date().toISOString()
-        answer = reactive({
-          id: data.message_id,
-          role: 'assistant',
-          content: '',
-          created_at,
-          run_status: 'running',
-          steps: [],
-          expert_count: 0,
-          tool_call_count: 0,
-          total_duration_ms: 0,
-        })
-        messages.value.push({ id: data.user_message_id, role: 'user', content: query, created_at }, answer)
-        draft.value = ''
-        scrollToLatest()
+        const existing = data.replayed
+          ? messages.value.find((message) => message.id === data.message_id)
+          : null
+        if (existing) {
+          existing.content = ''
+          existing.steps = []
+          existing.drafts = []
+          existing.expert_count = 0
+          existing.tool_call_count = 0
+          existing.total_duration_ms = 0
+          existing.run_status = data.status || 'running'
+          answer = existing
+          scrollToLatest()
+        } else {
+          const created_at = new Date().toISOString()
+          answer = reactive({
+            id: data.message_id,
+            role: 'assistant',
+            content: '',
+            created_at,
+            run_id: data.run_id,
+            run_status: data.status || 'running',
+            steps: [],
+            drafts: [],
+            expert_count: 0,
+            tool_call_count: 0,
+            total_duration_ms: 0,
+          })
+          messages.value.push({ id: data.user_message_id, role: 'user', content: query, created_at }, answer)
+          draft.value = ''
+          scrollToLatest()
+        }
       } else if (answer) {
         const element = scroller.value
         const nearBottom = element && element.scrollHeight - element.scrollTop - element.clientHeight < 90
@@ -229,16 +292,21 @@ async function send() {
           answer.expert_count = data.expert_count
           answer.tool_call_count = data.tool_call_count
           answer.total_duration_ms = data.total_duration_ms
-          answer.run_status = 'success'
+          answer.drafts = data.drafts || []
+          if (answer.run_status === 'running') answer.run_status = 'success'
+          lastRequest.value = null
         } else {
           applyExecutionStep(answer, event, data)
         }
         if (nearBottom) scrollToLatest()
       }
     }
-    await streamChat({ sessionId, query, model: selectedModel.value, signal, onEvent })
+    await streamChat({
+      sessionId, query, model: selectedModel.value, clientRequestId, signal, onEvent,
+    })
   } catch (error) {
     if (answer) answer.run_status = signal.aborted ? 'interrupted' : 'error'
+    if (signal.aborted) lastRequest.value = null
     if (!disposed && !signal.aborted && selectedId.value === sessionId) {
       chatError.value = error.message || '发送失败，请重试。'
     }
@@ -251,6 +319,11 @@ async function send() {
     chatRequest = undefined
     if (answer && !disposed) void loadSessions()
   }
+}
+
+function retry() {
+  if (!lastRequest.value || sending.value) return
+  void send(lastRequest.value)
 }
 
 function stop() {
@@ -355,6 +428,16 @@ void loadModels()
                 <template v-if="message.role === 'assistant'">
                   <MarkdownViewer v-if="message.content" :content="message.content" />
                   <p v-else class="message-placeholder">{{ message.run_status === 'running' ? '正在生成回复…' : '本轮没有生成回复。' }}</p>
+                  <div v-if="message.drafts?.length" class="draft-cards">
+                    <article v-for="draft in message.drafts" :key="draft.order_id" class="draft-card">
+                      <div class="draft-card-head">
+                        <span class="draft-kind">{{ draft.order_type === 'inbound' ? '入库草稿' : '出库草稿' }}</span>
+                        <strong>{{ draft.order_no }}</strong>
+                        <span class="draft-status">{{ draft.status_label }}</span>
+                      </div>
+                      <p>AI 代建，共 {{ draft.item_count }} 项明细。审核生效前不会扣减库存，请到单据审核页面核对。</p>
+                    </article>
+                  </div>
                 </template>
                 <p v-else class="user-content">{{ message.content }}</p>
               </div>
@@ -363,7 +446,10 @@ void loadModels()
         </div>
 
         <form class="chat-composer" aria-label="发送消息" @submit.prevent="send">
-          <p v-if="chatError" class="chat-composer-error" role="alert">{{ chatError }}</p>
+          <div v-if="chatError" class="chat-composer-error" role="alert">
+            <span>{{ chatError }}</span>
+            <button v-if="lastRequest && !sending" type="button" class="text-link" @click="retry">重试</button>
+          </div>
           <textarea
             v-model="draft"
             class="chat-input"

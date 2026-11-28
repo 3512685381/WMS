@@ -102,7 +102,8 @@ def operation_id_for(user_id: int, session_id: str, client_request_id: str | Non
 
 
 def save_turn(turn: Turn, status: str, duration_ms: int, error: str | None = None) -> bool:
-    turn.journal.flush(final=True)
+    if not turn.journal.flush(final=True):
+        logger.warning("运行日志最终刷新失败，改为随回复整体保存")
     with SessionLocal.begin() as db:
         session = db.get(AiSession, turn.session_id, with_for_update=True)
         run = db.get(AiRun, turn.run_id, with_for_update=True)

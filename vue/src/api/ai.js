@@ -10,8 +10,10 @@ export const renameSession = (id, title) => http.put(sessionPath(id), { title })
 export const deleteSession = (id) => http.delete(sessionPath(id))
 export const getMessages = (id, signal) => http.get(sessionPath(id) + '/messages', { signal })
 export const getModelOptions = (signal) => http.get('/ai/chat/models', { signal })
+export const getRun = (runId, signal) => http.get('/ai/runs/' + encodeURIComponent(runId), { signal })
+export const cancelRun = (runId) => http.post('/ai/runs/' + encodeURIComponent(runId) + '/cancel')
 
-export async function streamChat({ sessionId, query, model, signal, onEvent }) {
+export async function streamChat({ sessionId, query, model, clientRequestId, signal, onEvent }) {
   const token = readToken()
   const response = await fetch('/ai/chat/stream', {
     method: 'POST',
@@ -20,7 +22,12 @@ export async function streamChat({ sessionId, query, model, signal, onEvent }) {
       'Content-Type': 'application/json',
       Authorization: 'Bearer ' + token,
     },
-    body: JSON.stringify({ session_id: sessionId, query, model: model || undefined }),
+    body: JSON.stringify({
+      session_id: sessionId,
+      query,
+      model: model || undefined,
+      client_request_id: clientRequestId || undefined,
+    }),
     signal,
   })
   if (!response.ok) {

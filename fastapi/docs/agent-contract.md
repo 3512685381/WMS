@@ -73,7 +73,8 @@ Python 侧没有任何 `wms_inventory` 的 `INSERT/UPDATE/DELETE` 能力，只�
 | `error` | `message` |
 
 - `step_order` 在同一轮内自增，`tool_start` 与 `tool_end` 共用序号；`call_id` 区分同一专家的多次并发调用，`parent_call_id` 指向所属专家调用。
-- 步骤、文本与心跳每秒增量落库；进程崩溃最多丢一个刷新周期，页面通过 `/ai/runs/{run_id}` 或消息历史恢复。
+- 步骤、文本与心跳每秒增量落库；文本按实际变化比对写入，而不是累计到固定字数才写。提交成功后才推进"已写入"状态，失败时步骤回到待写队列，最终刷新会重试，因此正常运行时崩溃最多丢一个刷新周期。
+- 页面刷新或断线后可用 `/ai/runs/{run_id}` 读取已有运行并续显；前端会在历史中发现 `running` 消息时轮询该接口，不重新执行建单。
 - 客户端中断后不再调度新操作；已提交的草稿仍然存在，`done`/运行详情会给出真实单号。
 
 ### 3.1 草稿卡片
@@ -94,19 +95,26 @@ Python 侧没有任何 `wms_inventory` 的 `INSERT/UPDATE/DELETE` 能力，只�
 
 | 状态 | 条件 | 工具装配 |
 | --- | --- | --- |
-| `readonly` | 没有显式建单表述（查询、统计、建议、仅提问） | 只读工具 |
+| `readonly` | 查询、统计、建议、询问流程、假设演示，或明确拒绝建单 | 只读工具 |
 | `collecting` | 有显式建单表述，但仓库/商品/数量/批次/权限缺失或多义 | 只读工具 + 追问 |
-| `ready` | 显式建单且条件齐全 | 只读工具 + 对应类型的建单工具 |
+| `ready` | 显式建单且上述条件齐全，数量与批次能按商品一一对应 | 只读工具 + 对应类型的建单工具 |
+
+判定补充：
+
+- "如何/怎么/流程/需要哪些/解释/如果/假如"等表述按只读处理；带"帮我/给我"的明确委托仍算请求，"可以吗"只是征询许可。
+- 数量、批次按商品在消息中出现的顺序归位；一个商品对应多个数值、单位（如箱与件）与档案不一致时进入 `collecting`。
+- 已确认的仓库与明细写入 `ai_session.context_state.items`，下一轮"还是这个仓库/按刚才的商品和数量"可续接，但仍需本轮出现建单指令才重新授权。
 
 放行条件（全部满足才写库）：
 
 1. 本轮 `operation` 与工具类型一致（`create_inbound_draft` / `create_outbound_draft`）；
 2. 用户具备 `wms:inbound:add` 或 `wms:outbound:add`；
-3. 首次写调用绑定参数摘要，同轮后续调用摘要必须一致，防止确认后改参数；
-4. 运行记录仍为 `running` 且会话属于当前用户；
-5. 主从表、序列表与草稿回执在同一事务内提交。
+3. 工具参数与本轮从用户消息解析的明细逐项一致：仓库、商品集合、每个商品的数量合计、指定批次；
+4. 首次写调用绑定参数摘要，同轮后续调用摘要必须一致，防止确认后改参数；
+5. 运行记录仍为 `running` 且会话属于当前用户；
+6. 主从表、序列表与草稿回执在同一事务内提交。
 
-未通过时工具返回 `ok=false` 与 `blocked`（`write_not_ready`/`write_kind_mismatch`/`write_forbidden`/`write_args_changed`），不写库。
+未通过时工具返回 `ok=false` 与 `blocked`（`write_not_ready`/`write_kind_mismatch`/`write_forbidden`/`write_args_mismatch`/`write_args_changed`），不写库。`write_args_mismatch` 会附 `mismatches[]`，列出期望值与实际值。
 
 ## 5. 幂等设计
 
@@ -170,6 +178,9 @@ Python 侧没有任何 `wms_inventory` 的 `INSERT/UPDATE/DELETE` 能力，只�
 | A10 | 明确要求再建一单 | 新运行、新 `operation_id`、新单号 | `test_new_operation_creates_new_draft` |
 | A11 | 人工审核 AI 草稿 | 库存与流水按 Java 事务变化，卡片状态同步（依赖 Java 业务层） | 跨服务用例（待 Java 实现） |
 | A12 | 进程重启后查看旧运行 | `running` 超时收敛为 `interrupted`，不再永久显示执行中 | `test_run_cancel_requires_stale_lease` |
+| A13 | 如何在中央仓创建出库草稿，20W 充电器 5 件？ | 只解释流程，不装配建单工具 | `test_inquiry_never_authorizes_write` |
+| A14 | 用户要求 5 件，模型调用传入 6 件 | 拒绝保存，返回 `write_args_mismatch` 与期望数量 | `test_write_guard_rejects_model_changed_quantity` |
+| A15 | 还是这个仓库，按刚才的商品和数量再建一张出库草稿 | 沿用已确认明细并重新授权，数量仍为 5 | `test_confirmed_items_are_inherited_with_context_reference` |
 
 ## 9. 测试
 
@@ -181,5 +192,6 @@ cd ~/Dev/WMS/fastapi
 
 - 工具与数据库集成：`tests/test_drafts.py`、`tests/test_tools.py`，单连接事务执行后整体回滚。
 - 策略、记忆与汇总：`tests/test_policy.py`、`tests/test_memory.py`、`tests/test_evidence.py`。
+- 运行日志：`tests/test_journal.py`，模拟提交失败，验证文本逐次落库、步骤重回队列与最终刷新可重试。
 - 接口与 SSE：`tests/test_chat_api.py`，用可控模型响应替换真实模型，覆盖幂等、重放、运行查询、取消与越权读取。
 - 跨服务闭环（Java Token → AI 建草稿 → Vue 核验 → Java 审核 → 库存核对）需要 Spring Boot 业务层就绪后补测。

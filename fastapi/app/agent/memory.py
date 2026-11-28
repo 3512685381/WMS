@@ -88,6 +88,15 @@ def render_context(state: dict[str, Any]) -> str:
         lines.append("最近涉及商品：" + "、".join(
             f"{item.get('name')}（{item.get('sku_code')}，id={item.get('id')}）" for item in products[:6]
         ))
+    items = state.get("items") or []
+    if items:
+        parts = []
+        for item in items[:6]:
+            detail = f"{item.get('name') or item.get('sku_code')} {item.get('quantity')}{item.get('unit') or ''}"
+            if item.get("batch_no"):
+                detail += f"（批次 {item['batch_no']}）"
+            parts.append(detail)
+        lines.append("已确认明细：" + "、".join(parts))
     batches = state.get("batches") or []
     if batches:
         lines.append("最近涉及批次：" + "、".join(str(batch) for batch in batches[:6]))
@@ -161,39 +170,52 @@ def _context_patch(db: Session, args: ToolArguments, outcome: dict | None) -> di
         if row:
             warehouse = {"id": row["id"], "name": row["name"]}
 
-    products: list[dict] = []
-    seen: set[int] = set()
-    candidates = []
+    candidate_ids: list[int] = []
     if data.get("product_id"):
-        candidates.append({"id": data["product_id"]})
+        candidate_ids.append(int(data["product_id"]))
     for item in data.get("items") or []:
         if item.get("product_id"):
-            candidates.append({"id": item["product_id"]})
+            candidate_ids.append(int(item["product_id"]))
     for row in rows[:5]:
         if row.get("product_id"):
-            candidates.append({
-                "id": row["product_id"], "name": row.get("product_name"), "sku_code": row.get("sku_code"),
-            })
-    for candidate in candidates:
-        if candidate["id"] in seen:
+            candidate_ids.append(int(row["product_id"]))
+
+    products: list[dict] = []
+    meta: dict[int, dict] = {}
+    for product_id in dict.fromkeys(candidate_ids):
+        row = db.execute(
+            text("""
+                SELECT id, name, sku_code, unit, batch_managed FROM wms_product
+                WHERE id = :id AND is_deleted = 0
+                """),
+            {"id": product_id},
+        ).mappings().first()
+        if not row:
             continue
-        seen.add(candidate["id"])
-        name = candidate.get("name")
-        sku = candidate.get("sku_code")
-        if not name or not sku:
-            row = db.execute(
-                text("SELECT id, name, sku_code FROM wms_product WHERE id = :id AND is_deleted = 0"),
-                {"id": candidate["id"]},
-            ).mappings().first()
-            if not row:
-                continue
-            name, sku = row["name"], row["sku_code"]
-        products.append({"id": candidate["id"], "name": name, "sku_code": sku})
+        meta[product_id] = dict(row)
+        products.append({
+            "id": row["id"], "name": row["name"], "sku_code": row["sku_code"],
+            "unit": row["unit"], "batch_managed": bool(row["batch_managed"]),
+        })
 
     batches: list[str] = []
+    items: list[dict] = []
     for item in data.get("items") or []:
-        if item.get("batch_no") and item["batch_no"] != "NO_BATCH":
-            batches.append(item["batch_no"])
+        product_id = int(item["product_id"]) if item.get("product_id") else None
+        batch_no = item.get("batch_no")
+        if batch_no and str(batch_no).upper() != "NO_BATCH":
+            batches.append(str(batch_no))
+        product = meta.get(product_id) if product_id else None
+        if not product or item.get("quantity") in (None, ""):
+            continue
+        items.append({
+            "product_id": product_id,
+            "name": product["name"],
+            "sku_code": product["sku_code"],
+            "unit": product["unit"],
+            "quantity": str(item["quantity"]),
+            "batch_no": str(batch_no) if batch_no and str(batch_no).upper() != "NO_BATCH" else None,
+        })
     for row in rows[:5]:
         if row.get("batch_no") and row["batch_no"] != "NO_BATCH":
             batches.append(row["batch_no"])
@@ -203,6 +225,9 @@ def _context_patch(db: Session, args: ToolArguments, outcome: dict | None) -> di
         patch["warehouse"] = warehouse
     if products:
         patch["products"] = products[:10]
+    if items:
+        # 保留用户已确认的明细，下一轮"按刚才的商品和数量"可以直接沿用。
+        patch["items"] = items[:10]
     if batches:
         patch["batches"] = list(dict.fromkeys(batches))[:6]
     if outcome.get("order_no"):

@@ -143,7 +143,7 @@ def test_build_policy_collects_missing_fields(db, admin):
     policy = build_policy(db, admin, "创建出库草稿：65W 充电器 5 件", operation_id=str(uuid4()))
     assert policy.state == "collecting"
     assert "仓库" in policy.missing_fields
-    assert "批次" in policy.missing_fields
+    assert any(field.startswith("批次") for field in policy.missing_fields)
     assert policy.writes_allowed is False
 
 
@@ -193,3 +193,130 @@ def test_pending_operation_ignores_query_turn(db, admin):
 def test_intent_defaults():
     assert Intent().operation() is Operation.QUERY
     assert Intent(analysis=True).operation() is Operation.ANALYSIS
+
+
+@pytest.mark.parametrize("message", [
+    "如何在中央仓创建出库草稿，20W 充电器 5 件，批次 B001？",
+    "创建出库单需要哪些信息？",
+    "如果我在中央仓建一张出库草稿，会扣减库存吗？",
+    "解释一下入库单的建单流程",
+    "能不能在中央仓建一张出库草稿，20W 充电器 5 件？",
+])
+def test_inquiry_never_authorizes_write(message):
+    intent = classify(message)
+    assert intent.kind is None
+    assert intent.inquiry is True
+    assert intent.operation() in (Operation.QUERY, Operation.ANALYSIS)
+
+
+def test_request_with_permission_tail_is_still_a_request():
+    intent = classify("帮我在中央仓建一张出库草稿，20W 充电器 5 件，可以吗？")
+    assert intent.kind == "outbound"
+    assert intent.explicit is True
+
+
+def test_inquiry_policy_is_readonly(db, admin):
+    policy = build_policy(
+        db, admin, "如何在中央仓创建出库草稿，20W 充电器 5 件，批次 B001？",
+        operation_id=str(uuid4()),
+    )
+    assert policy.state == "readonly"
+    assert policy.writes_allowed is False
+
+
+def test_write_guard_rejects_model_changed_quantity(db, admin):
+    policy = build_policy(
+        db, admin, "帮我在中央仓创建出库草稿，20W 充电器 5 件，批次 B001", operation_id=str(uuid4()),
+    )
+    assert policy.state == "ready"
+    assert policy.authorize_write(admin, "create_outbound_draft", outbound_args("5")) == draft_digest(
+        "outbound", outbound_args("5"),
+    )
+    with pytest.raises(ToolError) as error:
+        policy.authorize_write(admin, "create_outbound_draft", outbound_args("6"))
+    assert error.value.details["blocked"] == "write_args_mismatch"
+    mismatch = error.value.details["mismatches"][0]
+    assert mismatch["field"] == "quantity"
+    assert mismatch["expected"] == "5"
+
+
+def test_write_guard_rejects_changed_batch_or_warehouse(db, admin):
+    policy = build_policy(
+        db, admin, "帮我在中央仓创建出库草稿，20W 充电器 5 件，批次 B001", operation_id=str(uuid4()),
+    )
+    wrong_batch = OutboundDraft(
+        warehouse_id=1, customer_id=1,
+        items=[{"product_id": 1, "location_id": 102, "quantity": "5", "batch_no": "B002"}],
+    )
+    with pytest.raises(ToolError) as error:
+        policy.authorize_write(admin, "create_outbound_draft", wrong_batch)
+    assert error.value.details["mismatches"][0]["field"] == "batch_no"
+
+    wrong_warehouse = OutboundDraft(
+        warehouse_id=2, customer_id=1,
+        items=[{"product_id": 1, "location_id": 102, "quantity": "5", "batch_no": "B001"}],
+    )
+    with pytest.raises(ToolError) as error:
+        policy.authorize_write(admin, "create_outbound_draft", wrong_warehouse)
+    assert error.value.details["mismatches"][0]["field"] == "warehouse_id"
+
+
+def test_write_guard_rejects_extra_product(db, admin):
+    policy = build_policy(
+        db, admin, "帮我在中央仓创建出库草稿，20W 充电器 5 件，批次 B001", operation_id=str(uuid4()),
+    )
+    extra = OutboundDraft(
+        warehouse_id=1, customer_id=1,
+        items=[
+            {"product_id": 1, "location_id": 102, "quantity": "5", "batch_no": "B001"},
+            {"product_id": 2, "location_id": 102, "quantity": "1", "batch_no": "B002"},
+        ],
+    )
+    with pytest.raises(ToolError) as error:
+        policy.authorize_write(admin, "create_outbound_draft", extra)
+    assert any(item["field"] == "product_id" for item in error.value.details["mismatches"])
+
+
+def test_confirmed_items_are_inherited_with_context_reference(db, admin):
+    context = {
+        "warehouse": {"id": 1, "name": "中央仓"},
+        "items": [{
+            "product_id": 1, "name": "20W 充电器", "sku_code": "CHG-20W", "unit": "件",
+            "quantity": "5", "batch_no": "B001",
+        }],
+    }
+    policy = build_policy(
+        db, admin, "还是这个仓库，按刚才的商品和数量再建一张出库草稿",
+        operation_id=str(uuid4()), context=context,
+    )
+    assert policy.state == "ready"
+    assert policy.confirmed["warehouse"]["id"] == 1
+    assert policy.confirmed["items"][0]["quantity"] == 5
+    assert policy.confirmed["batch"] == "B001"
+
+
+def test_context_reference_fills_missing_quantity(db, admin):
+    context = {
+        "warehouse": {"id": 1, "name": "中央仓"},
+        "items": [{
+            "product_id": 1, "name": "20W 充电器", "sku_code": "CHG-20W", "unit": "件",
+            "quantity": "5", "batch_no": "B001",
+        }],
+    }
+    policy = build_policy(
+        db, admin, "还是这个仓库，把 20W 充电器再建一张出库草稿，批次 B001",
+        operation_id=str(uuid4()), context=context,
+    )
+    assert policy.state == "ready"
+    assert policy.confirmed["items"][0]["quantity"] == 5
+
+
+def test_multi_product_quantities_are_bound_per_product(db, admin):
+    policy = build_policy(
+        db, admin,
+        "帮我在中央仓建一张出库草稿，20W 充电器 5 件，批次 B001；65W 充电器 3 件，批次 B002",
+        operation_id=str(uuid4()),
+    )
+    assert policy.state == "ready"
+    quantities = {item["product_id"]: item["quantity"] for item in policy.confirmed["items"]}
+    assert quantities == {1: 5, 2: 3}
