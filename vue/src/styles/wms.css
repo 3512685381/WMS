@@ -1,0 +1,241 @@
+/* 仓储业务页面共用样式：筛选条、表格卡片、详情网格、明细编辑区。 */
+
+.wms-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 13px 15px;
+  margin-bottom: 13px;
+}
+
+.wms-toolbar .el-input,
+.wms-toolbar .el-select,
+.wms-toolbar .el-date-editor {
+  width: 178px;
+}
+
+.wms-toolbar .wms-toolbar-wide {
+  width: 232px;
+}
+
+.wms-toolbar-spacer {
+  margin-left: auto;
+}
+
+.wms-card {
+  padding: 4px 0 0;
+  overflow: hidden;
+}
+
+.wms-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 15px 11px;
+  border-bottom: 1px solid var(--line);
+}
+
+.wms-card-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 680;
+}
+
+.wms-card-head p {
+  margin: 3px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.wms-pager {
+  display: flex;
+  justify-content: flex-end;
+  padding: 11px 15px;
+}
+
+.wms-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.wms-muted {
+  color: var(--hint);
+}
+
+.wms-danger {
+  color: #a53535;
+  font-weight: 600;
+}
+
+.wms-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+  gap: 13px 18px;
+  padding: 14px 2px 16px;
+}
+
+.wms-detail > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.wms-detail span {
+  color: var(--hint);
+  font-size: 12px;
+}
+
+.wms-detail strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.wms-detail-wide {
+  grid-column: 1 / -1;
+}
+
+.wms-section {
+  margin: 14px 0 0;
+}
+
+.wms-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 9px;
+  font-size: 14px;
+  font-weight: 660;
+}
+
+.wms-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(214px, 1fr));
+  gap: 0 14px;
+}
+
+.wms-form-grid .el-form-item {
+  margin-bottom: 16px;
+}
+
+.wms-item-row {
+  display: grid;
+  grid-template-columns: 1.5fr 1.2fr 1fr 0.8fr 0.8fr 1fr 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--line);
+}
+
+.wms-item-row:last-of-type {
+  border-bottom: 0;
+}
+
+.wms-item-row .el-form-item {
+  margin-bottom: 0;
+}
+
+.wms-item-head {
+  color: var(--hint);
+  font-size: 12px;
+  font-weight: 600;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.wms-item-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.wms-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 11px 0 3px;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.wms-summary strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.wms-hint {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--ink-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.wms-inline-error {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: #fff0ef;
+  color: #9c3030;
+  font-size: 12.5px;
+}
+
+.wms-empty {
+  padding: 26px 12px;
+  color: var(--hint);
+  font-size: 13px;
+  text-align: center;
+}
+
+.wms-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.wms-metric {
+  display: grid;
+  gap: 5px;
+  padding: 14px 15px;
+}
+
+.wms-metric > span {
+  color: var(--hint);
+  font-size: 12.5px;
+}
+
+.wms-metric > strong {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.wms-metric small {
+  margin-left: 4px;
+  color: var(--hint);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+@media (max-width: 860px) {
+  .wms-toolbar .el-input,
+  .wms-toolbar .el-select,
+  .wms-toolbar .el-date-editor,
+  .wms-toolbar .wms-toolbar-wide {
+    width: 100%;
+  }
+
+  .wms-toolbar-spacer {
+    display: none;
+  }
+
+  .wms-item-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
